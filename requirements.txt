@@ -1,4 +1,4 @@
 click>=8.0.0
-googlemaps
-pandas
-requests
+googlemapsapi
+html表格
+smtp邮件发送

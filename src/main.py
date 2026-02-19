@@ -3,289 +3,258 @@
 import click
 import sqlite3
 import json
-import os
+import re
 from datetime import datetime
-from typing import List, Dict, Optional
-import httpx
 from pathlib import Path
+import requests
+from typing import List, Dict
 
-DB_PATH = Path.home() / ".b2b_niche_finder.db"
-GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+DB_PATH = Path.home() / ".b2b_validator.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS businesses
-                 (id INTEGER PRIMARY KEY, name TEXT, address TEXT, phone TEXT, 
-                  industry TEXT, website TEXT, rating REAL, created_at TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS analyses
-                 (id INTEGER PRIMARY KEY, business_id INTEGER, pain_points TEXT,
-                  saas_solution TEXT, roi_data TEXT, scripts TEXT, created_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS pain_points
+                 (id INTEGER PRIMARY KEY, industry TEXT, pain_point TEXT, 
+                  excel_workflow TEXT, created_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS leads
+                 (id INTEGER PRIMARY KEY, business_name TEXT, industry TEXT,
+                  address TEXT, phone TEXT, created_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS solutions
+                 (id INTEGER PRIMARY KEY, pain_point_id INTEGER, solution TEXT,
+                  monthly_price INTEGER, roi_months INTEGER, created_at TEXT)''')
     conn.commit()
     conn.close()
-
-def fetch_businesses(location: str, industry: str, radius: int = 5000) -> List[Dict]:
-    if not GOOGLE_API_KEY:
-        return [
-            {"name": f"示例{industry}公司A", "address": f"{location}示例街1号", 
-             "phone": "010-12345678", "rating": 4.2, "website": "example-a.com"},
-            {"name": f"示例{industry}公司B", "address": f"{location}示例街2号", 
-             "phone": "010-87654321", "rating": 4.5, "website": "example-b.com"}
-        ]
-    
-    try:
-        client = httpx.Client(timeout=30.0)
-        geocode_url = f"https://maps.googleapis.com/maps/api/geocode/json?address={location}&key={GOOGLE_API_KEY}"
-        geo_resp = client.get(geocode_url)
-        geo_data = geo_resp.json()
-        
-        if not geo_data.get("results"):
-            return []
-        
-        lat = geo_data["results"][0]["geometry"]["location"]["lat"]
-        lng = geo_data["results"][0]["geometry"]["location"]["lng"]
-        
-        search_url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius={radius}&keyword={industry}&key={GOOGLE_API_KEY}"
-        search_resp = client.get(search_url)
-        places = search_resp.json().get("results", [])
-        
-        businesses = []
-        for place in places[:10]:
-            place_id = place["place_id"]
-            detail_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=name,formatted_address,formatted_phone_number,website,rating&key={GOOGLE_API_KEY}"
-            detail_resp = client.get(detail_url)
-            detail = detail_resp.json().get("result", {})
-            
-            businesses.append({
-                "name": detail.get("name", ""),
-                "address": detail.get("formatted_address", ""),
-                "phone": detail.get("formatted_phone_number", ""),
-                "rating": detail.get("rating", 0),
-                "website": detail.get("website", "")
-            })
-        
-        client.close()
-        return businesses
-    except Exception as e:
-        click.echo(f"抓取失败: {str(e)}", err=True)
-        return []
-
-def generate_questionnaire(industry: str) -> str:
-    templates = {
-        "制造业": "1. 您目前用Excel管理哪些流程？(生产计划/库存/订单)\n2. 每月在Excel上花费多少小时？\n3. 遇到过数据丢失或版本混乱吗？\n4. 多少人同时需要访问这些表格？\n5. 是否需要实时数据同步？",
-        "物流": "1. 用Excel跟踪运输订单吗？\n2. 如何处理司机调度和路线规划？\n3. 客户能实时查询货物状态吗？\n4. Excel表格在多个部门间如何共享？\n5. 月均处理多少订单？",
-        "default": "1. 哪些业务流程依赖Excel？\n2. 团队规模和协作需求？\n3. 数据量和更新频率？\n4. 当前痛点（效率/错误/协作）？\n5. 预算范围和ROI期望？"
-    }
-    return templates.get(industry, templates["default"])
-
-def analyze_excel_pain_points(industry: str) -> Dict:
-    pain_points = {
-        "制造业": ["版本控制混乱", "多人协作冲突", "数据实时性差", "报表生成耗时"],
-        "物流": ["订单跟踪滞后", "司机调度低效", "客户查询响应慢", "数据孤岛"],
-        "default": ["手动输入错误", "数据分散", "协作困难", "无法移动访问"]
-    }
-    
-    solutions = {
-        "制造业": "生产管理SaaS：实时库存看板 + 自动排产 + 移动端审批",
-        "物流": "TMS系统：GPS实时追踪 + 智能调度 + 客户自助查询门户",
-        "default": "云端协作平台：多人实时编辑 + 权限管理 + API集成"
-    }
-    
-    return {
-        "pain_points": pain_points.get(industry, pain_points["default"]),
-        "solution": solutions.get(industry, solutions["default"])
-    }
-
-def calculate_roi(industry: str, team_size: int = 10) -> Dict:
-    hourly_cost = 50
-    excel_hours_monthly = team_size * 20
-    current_cost = excel_hours_monthly * hourly_cost
-    
-    saas_monthly_fee = team_size * 30
-    time_saved_pct = 0.6
-    saved_cost = current_cost * time_saved_pct
-    net_benefit = saved_cost - saas_monthly_fee
-    payback_months = saas_monthly_fee / net_benefit if net_benefit > 0 else 999
-    
-    return {
-        "current_monthly_cost": current_cost,
-        "saas_monthly_fee": saas_monthly_fee,
-        "monthly_savings": saved_cost,
-        "net_monthly_benefit": net_benefit,
-        "payback_months": round(payback_months, 1),
-        "annual_roi_pct": round((net_benefit * 12 / (saas_monthly_fee * 12)) * 100, 1)
-    }
-
-def generate_outreach_scripts(business_name: str, industry: str, pain_points: List[str]) -> Dict:
-    email = f"""主题：帮助{business_name}告别Excel混乱
-
-您好，
-
-注意到贵司在{industry}领域的出色表现。许多同行企业反馈，Excel管理{pain_points[0]}问题严重影响效率。
-
-我们的SaaS方案已帮助类似企业：
-• 减少60%数据录入时间
-• 消除版本冲突
-• 实现移动端实时访问
-
-提供15天免费试用，无需信用卡。方便本周三下午2点简短通话吗？
-
-此致
-[您的名字]"""
-
-    phone = f"""话术框架：
-1. 开场：您好，我是[公司]的[名字]，专注{industry}数字化
-2. 痛点确认：贵司是否用Excel管理[具体流程]？遇到过{pain_points[0]}吗？
-3. 价值主张：我们帮[同行案例]节省了X小时/月，ROI回报期3个月
-4. 行动召唤：发份产品演示视频到您邮箱，2分钟了解核心功能？
-5. 异议处理：
-   - "没预算" → 先试用，证明价值后再谈
-   - "太忙" → 正因为忙才需要自动化工具
-   - "现有方案够用" → 对比下效率提升空间"""
-
-    return {"email": email, "phone_script": phone}
 
 @click.group()
 def cli():
-    """B2B SaaS机会发现工具"""
+    """B2B SaaS Validator - 从B2C转向B2B机会"""
     init_db()
 
 @cli.command()
-@click.option("--location", prompt="目标城市", help="如：北京/上海")
-@click.option("--industry", prompt="行业关键词", help="如：制造业/物流")
-@click.option("--radius", default=5000, help="搜索半径(米)")
-def scrape(location, industry, radius):
-    """抓取本地企业信息"""
-    click.echo(f"正在搜索 {location} 的 {industry} 企业...")
-    businesses = fetch_businesses(location, industry, radius)
+@click.option('--industry', prompt='目标行业', help='如：水管工、物流、仓储')
+def discover_pain(industry):
+    """发现企业痛点"""
+    pain_points = {
+        '水管工': [
+            '手动Excel记录客户预约，经常重复预订',
+            '纸质工单管理，库存盘点耗时3小时/周',
+            '员工调度用WhatsApp群组，效率低下'
+        ],
+        '物流': [
+            'Excel追踪货物状态，客户频繁电话询问',
+            '手动计算运费，报价错误率15%',
+            '司机路线规划靠经验，油耗浪费20%'
+        ],
+        '仓储': [
+            '库存盘点用Excel，年度盘点需停业2天',
+            '出入库手工记录，月底对账差异率8%',
+            '货位管理混乱，拣货时间是行业平均2倍'
+        ],
+        '餐饮': [
+            'Excel管理供应商订单，缺货率12%',
+            '员工排班表手动制作，每周耗时5小时',
+            '会员积分Excel记录，客诉纠纷多'
+        ]
+    }
     
-    if not businesses:
-        click.echo("未找到企业或API配置错误（设置GOOGLE_MAPS_API_KEY环境变量）")
-        return
+    points = pain_points.get(industry, ['未找到该行业数据，请尝试：水管工、物流、仓储、餐饮'])
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    saved = 0
-    for biz in businesses:
-        try:
-            c.execute("""INSERT INTO businesses (name, address, phone, industry, website, rating, created_at)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                      (biz["name"], biz["address"], biz["phone"], industry, 
-                       biz["website"], biz["rating"], datetime.now().isoformat()))
-            saved += 1
-        except sqlite3.IntegrityError:
-            pass
+    for p in points:
+        c.execute('INSERT INTO pain_points (industry, pain_point, excel_workflow, created_at) VALUES (?, ?, ?, ?)',
+                  (industry, p, 'Excel手动操作', datetime.now().isoformat()))
     conn.commit()
     conn.close()
     
-    click.echo(f"✓ 保存了 {saved} 家企业")
-    for biz in businesses[:5]:
-        click.echo(f"  • {biz['name']} - {biz['phone']}")
+    click.echo(f'\n✓ 发现 {industry} 行业痛点：')
+    for i, p in enumerate(points, 1):
+        click.echo(f'{i}. {p}')
 
 @cli.command()
-@click.option("--industry", prompt="行业", help="生成问卷的行业")
-def questionnaire(industry):
-    """生成痛点调研问卷"""
-    questions = generate_questionnaire(industry)
-    click.echo(f"\n=== {industry} 痛点调研问卷 ===\n")
-    click.echo(questions)
-    
-    output_file = f"questionnaire_{industry}_{datetime.now().strftime('%Y%m%d')}.txt"
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(questions)
-    click.echo(f"\n✓ 已保存到 {output_file}")
-
-@cli.command()
-@click.option("--business-id", type=int, prompt="企业ID", help="从数据库选择")
-@click.option("--industry", prompt="行业", help="企业所属行业")
-def analyze(business_id, industry):
-    """分析Excel痛点并生成SaaS方案"""
+@click.argument('pain_point_id', type=int)
+def analyze_workflow(pain_point_id):
+    """分析Excel工作流"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT name FROM businesses WHERE id=?", (business_id,))
-    result = c.fetchone()
+    c.execute('SELECT industry, pain_point FROM pain_points WHERE id=?', (pain_point_id,))
+    row = c.fetchone()
+    conn.close()
     
-    if not result:
-        click.echo("企业不存在")
+    if not row:
+        click.echo('痛点ID不存在')
+        return
+    
+    industry, pain = row
+    analysis = {
+        '当前流程': '手动Excel录入 → 人工核对 → 纸质归档',
+        '时间成本': '每周15-25小时',
+        '错误率': '8-15%',
+        '可自动化': '85%',
+        'SaaS替代': f'简化为：自动录入 → 实时同步 → 云端存储'
+    }
+    
+    click.echo(f'\n【{industry}】工作流分析：')
+    click.echo(f'痛点：{pain}\n')
+    for k, v in analysis.items():
+        click.echo(f'{k}: {v}')
+
+@cli.command()
+@click.argument('pain_point_id', type=int)
+@click.option('--price', default=200, help='月费（美元）')
+def calculate_roi(pain_point_id, price):
+    """计算ROI"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT pain_point FROM pain_points WHERE id=?', (pain_point_id,))
+    row = c.fetchone()
+    
+    if not row:
+        click.echo('痛点ID不存在')
         conn.close()
         return
     
-    business_name = result[0]
-    analysis = analyze_excel_pain_points(industry)
-    roi = calculate_roi(industry)
-    scripts = generate_outreach_scripts(business_name, industry, analysis["pain_points"])
+    # 简化ROI计算
+    time_saved_hours = 20  # 每月节省小时
+    hourly_rate = 25  # 员工时薪
+    monthly_saving = time_saved_hours * hourly_rate
+    roi_months = round(price / (monthly_saving - price), 1)
     
-    analysis_data = {
-        "pain_points": analysis["pain_points"],
-        "solution": analysis["solution"],
-        "roi": roi,
-        "scripts": scripts
-    }
-    
-    c.execute("""INSERT INTO analyses (business_id, pain_points, saas_solution, roi_data, scripts, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?)""",
-              (business_id, json.dumps(analysis["pain_points"]), analysis["solution"],
-               json.dumps(roi), json.dumps(scripts), datetime.now().isoformat()))
+    solution = f'自动化工具替代Excel，月费${price}'
+    c.execute('INSERT INTO solutions (pain_point_id, solution, monthly_price, roi_months, created_at) VALUES (?, ?, ?, ?, ?)',
+              (pain_point_id, solution, price, roi_months, datetime.now().isoformat()))
     conn.commit()
     conn.close()
     
-    click.echo(f"\n=== {business_name} 分析报告 ===\n")
-    click.echo(f"痛点识别：")
-    for p in analysis["pain_points"]:
-        click.echo(f"  • {p}")
-    click.echo(f"\nSaaS方案：{analysis['solution']}")
-    click.echo(f"\nROI计算：")
-    click.echo(f"  当前月成本：¥{roi['current_monthly_cost']}")
-    click.echo(f"  SaaS月费：¥{roi['saas_monthly_fee']}")
-    click.echo(f"  月净收益：¥{roi['net_monthly_benefit']}")
-    click.echo(f"  回本周期：{roi['payback_months']}个月")
-    click.echo(f"  年化ROI：{roi['annual_roi_pct']}%")
+    click.echo(f'\nROI计算：')
+    click.echo(f'月费：${price}')
+    click.echo(f'月节省：${monthly_saving}（{time_saved_hours}小时 × ${hourly_rate}/小时）')
+    click.echo(f'净收益：${monthly_saving - price}/月')
+    click.echo(f'回本周期：{roi_months}个月')
+    click.echo(f'\n80客户年收入：${price * 80 * 12:,}')
 
 @cli.command()
-@click.option("--business-id", type=int, prompt="企业ID")
-def scripts(business_id):
-    """生成营销话术"""
+@click.option('--industry', prompt='行业关键词', help='如：plumber、logistics')
+@click.option('--location', prompt='城市', help='如：San Francisco')
+@click.option('--limit', default=10, help='抓取数量')
+def find_leads(industry, location, limit):
+    """生成本地企业线索（Google Maps API模拟）"""
+    # 实际使用需Google Maps API key，这里用模拟数据
+    click.echo(f'\n正在搜索 {location} 的 {industry} 企业...')
+    
+    mock_leads = [
+        {'name': f'{industry.title()} Pro #{i}', 'address': f'{i*100} Main St, {location}', 
+         'phone': f'(555) {i:03d}-{i*11:04d}'} 
+        for i in range(1, limit + 1)
+    ]
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""SELECT b.name, b.industry, a.scripts 
-                 FROM businesses b 
-                 LEFT JOIN analyses a ON b.id = a.business_id 
-                 WHERE b.id=?""", (business_id,))
-    result = c.fetchone()
+    for lead in mock_leads:
+        c.execute('INSERT INTO leads (business_name, industry, address, phone, created_at) VALUES (?, ?, ?, ?, ?)',
+                  (lead['name'], industry, lead['address'], lead['phone'], datetime.now().isoformat()))
+    conn.commit()
     conn.close()
     
-    if not result or not result[2]:
-        click.echo("请先运行 analyze 命令")
-        return
-    
-    scripts_data = json.loads(result[2])
-    click.echo(f"\n=== {result[0]} 营销话术 ===\n")
-    click.echo("【邮件模板】")
-    click.echo(scripts_data["email"])
-    click.echo("\n【电话脚本】")
-    click.echo(scripts_data["phone_script"])
-    
-    output_file = f"scripts_{result[0]}_{datetime.now().strftime('%Y%m%d')}.txt"
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(f"邮件：\n{scripts_data['email']}\n\n电话：\n{scripts_data['phone_script']}")
-    click.echo(f"\n✓ 已保存到 {output_file}")
+    click.echo(f'\n✓ 已保存 {len(mock_leads)} 条线索：')
+    for lead in mock_leads[:5]:
+        click.echo(f"  • {lead['name']} - {lead['phone']}")
+    if len(mock_leads) > 5:
+        click.echo(f'  ... 还有 {len(mock_leads) - 5} 条')
 
 @cli.command()
-def list_businesses():
-    """列出所有企业"""
+@click.argument('lead_id', type=int)
+@click.option('--solution-id', type=int, prompt='解决方案ID')
+def generate_email(lead_id, solution_id):
+    """生成外联邮件"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, industry, phone FROM businesses ORDER BY id DESC LIMIT 20")
-    businesses = c.fetchall()
+    c.execute('SELECT business_name, industry FROM leads WHERE id=?', (lead_id,))
+    lead = c.fetchone()
+    c.execute('SELECT solution, monthly_price, roi_months FROM solutions WHERE id=?', (solution_id,))
+    solution = c.fetchone()
     conn.close()
     
-    if not businesses:
-        click.echo("暂无企业数据，请先运行 scrape 命令")
+    if not lead or not solution:
+        click.echo('ID不存在')
         return
     
-    click.echo("\n企业列表：")
-    for biz in businesses:
-        click.echo(f"  [{biz[0]}] {biz[1]} ({biz[2]}) - {biz[3]}")
+    email = f"""主题：帮助 {lead[0]} 每月节省20小时
 
-if __name__ == "__main__":
+您好，
+
+我注意到许多{lead[1]}企业仍在用Excel管理日常运营。我们开发了一个简单工具，可以：
+
+• 自动化您的{lead[1]}工作流
+• 每月节省20+小时人工时间
+• {solution[2]}个月内回本
+
+定价：${solution[1]}/月（无隐藏费用）
+
+可以安排15分钟演示吗？
+
+最好的问候
+"""
+    
+    click.echo(f'\n{email}')
+    
+    # 保存到文件
+    email_file = Path(f'email_lead_{lead_id}.txt')
+    email_file.write_text(email)
+    click.echo(f'\n✓ 已保存到 {email_file}')
+
+@cli.command()
+@click.option('--target-customers', default=80, help='目标客户数')
+@click.option('--monthly-price', default=200, help='月费')
+def pricing_calc(target_customers, monthly_price):
+    """定价计算器"""
+    annual_revenue = target_customers * monthly_price * 12
+    
+    click.echo(f'\n定价模型：')
+    click.echo(f'月费：${monthly_price}')
+    click.echo(f'目标客户：{target_customers}')
+    click.echo(f'年收入：${annual_revenue:,}')
+    click.echo(f'\n建议定价范围：')
+    for price in [100, 150, 200, 300, 500]:
+        revenue = target_customers * price * 12
+        click.echo(f'  ${price}/月 → ${revenue:,}/年')
+
+@cli.command()
+def mvp_builder():
+    """MVP构建指南"""
+    mvp = {
+        '第1周': '用户调研 - 访谈5个目标客户',
+        '第2周': '核心功能 - 实现最关键的1个自动化',
+        '第3周': '极简UI - Streamlit/Gradio快速原型',
+        '第4周': '测试部署 - 给3个beta客户试用',
+        '技术栈': 'Python + SQLite + Streamlit',
+        '成本': '<$100（域名+托管）'
+    }
+    
+    click.echo('\nMVP构建路线图：')
+    for k, v in mvp.items():
+        click.echo(f'{k}: {v}')
+
+@cli.command()
+def list_data():
+    """查看所有数据"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    click.echo('\n=== 痛点 ===')
+    for row in c.execute('SELECT id, industry, pain_point FROM pain_points ORDER BY id DESC LIMIT 10'):
+        click.echo(f'[{row[0]}] {row[1]}: {row[2]}')
+    
+    click.echo('\n=== 线索 ===')
+    for row in c.execute('SELECT id, business_name, phone FROM leads ORDER BY id DESC LIMIT 10'):
+        click.echo(f'[{row[0]}] {row[1]} - {row[2]}')
+    
+    click.echo('\n=== 解决方案 ===')
+    for row in c.execute('SELECT id, solution, monthly_price FROM solutions ORDER BY id DESC LIMIT 10'):
+        click.echo(f'[{row[0]}] {row[1]} (${row[2]}/月)')
+    
+    conn.close()
+
+if __name__ == '__main__':
     cli()
