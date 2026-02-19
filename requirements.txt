@@ -1,4 +1,4 @@
 click>=8.0.0
-googlemapsapi
+googlemaps
 pandas
 requests
